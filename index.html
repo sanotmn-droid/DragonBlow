@@ -547,6 +547,8 @@ const player = {
                     this.isAttacking = false;
                     this.attackType = null;
                 }
+            } else if (this.vy > 0) {
+                checkStomp(); // falling: did we land on an enemy?
             }
         }
 
@@ -682,6 +684,7 @@ const player = {
         const liftB = walking ? Math.round(Math.max(0, -ws) * 7) : 0;      // leg B foot lift
         const armSwing = -legAx;                                           // arms swing opposite to legs
         const ubY = topY - bob;                                            // upper body Y (bounces)
+        const kicking = this.isAttacking && this.attackType === 'kick' && !this.isCrouching;
 
         // Legs (Gi Pants & Shoes)
         ctx.fillStyle = '#ffffff'; // White pants
@@ -689,6 +692,11 @@ const player = {
             ctx.fillRect(2, topY + baseHeight - 15, 36, 15);
             ctx.fillStyle = '#8b4513'; // Shoes
             ctx.fillRect(isRight ? 20 : -5, topY + baseHeight - 8, 20, 8);
+        } else if (kicking) {
+            // Kicking: one leg planted, the other is the extended kick leg drawn below => two legs in total
+            ctx.fillRect(13, topY + 35, 14, 28);
+            ctx.fillStyle = '#8b4513';
+            ctx.fillRect(11, topY + 58, 16, 12);
         } else {
             ctx.fillRect(4 + legAx, topY + 35, 14, 28 - liftA);
             ctx.fillRect(22 + legBx, topY + 35, 14, 28 - liftB);
@@ -1018,7 +1026,7 @@ function resetExtras() {
 // --- Knives, Boss & shared helpers ---
 const MAX_KNIVES = 99;
 const KNIFE_DROP_RATE = 0.3; // chance that a defeated enemy drops a knife
-const HIT_DAMAGE = { punch: 2, kick: 3, tornado: 4, shoryuken: 6 }; // damage vs boss
+const HIT_DAMAGE = { punch: 2, kick: 3, tornado: 4, shoryuken: 6, stomp: 3 }; // damage vs tough enemies / bosses
 let knifeItems = [];   // knives lying on the ground
 let thrownKnives = []; // knives in flight
 let boss = null;
@@ -1618,6 +1626,20 @@ function spawnAll() {
 // ====================== Shared helpers for the new enemies ======================
 const fcol = (e, c) => (e.flash > 0 && Math.floor(e.flash / 2) % 2 === 0 ? '#ffffff' : c);
 
+// Aim a dive at (tx, ty). The dive always points at least ~30 degrees downward, so it can never
+// run flat along a wall or climb up and out of the top of the screen.
+function diveVector(cx, cy, tx, ty, speed) {
+    const dx = tx - cx, dy = ty - cy;
+    const len = Math.hypot(dx, dy) || 1;
+    let vx = dx / len * speed, vy = dy / len * speed;
+    const minVy = speed * 0.5;
+    if (vy < minVy) {
+        vy = minVy;
+        vx = (dx >= 0 ? 1 : -1) * Math.sqrt(speed * speed - vy * vy);
+    }
+    return { vx, vy };
+}
+
 function playerTouches(x1, x2, yTop, yBottom) {
     return x1 < player.x + player.width && x2 > player.x &&
            yTop < player.y && yBottom > player.y - player.height;
@@ -1925,9 +1947,10 @@ class Condor {
             this.facing = pcx > cx ? 1 : -1;
             this.y -= 0.6;
             if (--this.timer <= 0) {
-                const dx = pcx - cx, dy = pcy - cy, len = Math.hypot(dx, dy) || 1;
-                this.vx = dx / len * 9.5;
-                this.vy = dy / len * 9.5;
+                const v = diveVector(cx, cy, pcx, pcy, 9.5);
+                this.vx = v.vx;
+                this.vy = v.vy;
+                this.diveT = 0;
                 this.facing = this.vx >= 0 ? 1 : -1;
                 this.state = 'dive';
                 this.hitDone = false;
@@ -1940,7 +1963,7 @@ class Condor {
                 this.hitDone = true;
                 hurtPlayer(14, cx);
             }
-            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 150 || this.x > cameraX + CANVAS_WIDTH + 150) {
+            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 150 || this.x > cameraX + CANVAS_WIDTH + 150 || ++this.diveT > 90) {
                 this.state = 'rise';
                 this.vy = -5;
                 this.vx = (this.vx >= 0 ? 1 : -1) * 4;
@@ -2104,9 +2127,10 @@ class BatBoss extends Boss {
         } else if (this.state === 'windup') {
             this.y -= 0.5;
             if (--this.timer <= 0) {
-                const dx = pcx - cx, dy = pcy - cy, len = Math.hypot(dx, dy) || 1;
-                this.vx = dx / len * 8.5;
-                this.vy = dy / len * 8.5;
+                const v = diveVector(cx, cy, pcx, pcy, 8.5);
+                this.vx = v.vx;
+                this.vy = v.vy;
+                this.diveT = 0;
                 this.state = 'dive';
                 this.hitDone = false;
                 audio.screech();
@@ -2115,7 +2139,7 @@ class BatBoss extends Boss {
             this.x += this.vx;
             this.y += this.vy;
             this.contact(16);
-            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 40 || this.x + this.width > cameraX + CANVAS_WIDTH + 40) {
+            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 40 || this.x + this.width > cameraX + CANVAS_WIDTH + 40 || ++this.diveT > 90) {
                 this.state = 'rise';
             }
         } else if (this.state === 'rise') {      // low and slow: your chance to hit it
@@ -2126,6 +2150,10 @@ class BatBoss extends Boss {
         }
         if (this.state !== 'enter') {
             this.x = Math.max(cameraX + 4, Math.min(cameraX + CANVAS_WIDTH - this.width - 4, this.x));
+        }
+        if (this.y - this.height < 0) { // never leave through the top of the screen
+            this.y = this.height;
+            if (this.state === 'dive') this.state = 'rise';
         }
     }
 
@@ -2338,9 +2366,10 @@ class CondorBoss extends Boss {
             this.face = pcx > cx ? 1 : -1;
             this.y -= 0.5;
             if (--this.timer <= 0) {
-                const dx = pcx - cx, dy = pcy - cy, len = Math.hypot(dx, dy) || 1;
-                this.vx = dx / len * 10.5;
-                this.vy = dy / len * 10.5;
+                const v = diveVector(cx, cy, pcx, pcy, 10.5);
+                this.vx = v.vx;
+                this.vy = v.vy;
+                this.diveT = 0;
                 this.face = this.vx >= 0 ? 1 : -1;
                 this.state = 'dive';
                 this.hitDone = false;
@@ -2349,7 +2378,7 @@ class CondorBoss extends Boss {
             this.x += this.vx;
             this.y += this.vy;
             this.contact(18);
-            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 40 || this.x + this.width > cameraX + CANVAS_WIDTH + 40) {
+            if (this.y >= FLOOR_Y - 4 || this.x < cameraX - 40 || this.x + this.width > cameraX + CANVAS_WIDTH + 40 || ++this.diveT > 90) {
                 this.state = 'rise';
             }
         } else if (this.state === 'rise') {
@@ -2360,6 +2389,10 @@ class CondorBoss extends Boss {
         }
         if (this.state !== 'enter') {
             this.x = Math.max(cameraX + 4, Math.min(cameraX + CANVAS_WIDTH - this.width - 4, this.x));
+        }
+        if (this.y - this.height < 0) { // never leave through the top of the screen
+            this.y = this.height;
+            if (this.state === 'dive') this.state = 'rise';
         }
     }
 
@@ -2581,6 +2614,25 @@ function triggerJump() {
     if (player.isGrounded && !player.isAttacking) {
         player.vy = -13;
         player.isGrounded = false;
+    }
+}
+
+// Landing on an enemy's head from above hurts it, then the player bounces off
+function checkStomp() {
+    const feet = player.y;
+    const prevFeet = player.y - player.vy;
+    const targets = [...enemies, ...bats, ...(boss ? [boss] : [])];
+    for (const e of targets) {
+        if (!e.active || e.isGrabbing) continue;
+        const top = e.y - e.height;
+        if (player.x + player.width > e.x + 4 && player.x < e.x + e.width - 4 &&
+            prevFeet <= top + 8 && feet >= top) {
+            player.attackId++;                       // each stomp counts as a new hit
+            hitTarget(e, HIT_DAMAGE.stomp, player.attackId);
+            player.vy = -9;                          // bounce
+            player.y = top;
+            return;
+        }
     }
 }
 
